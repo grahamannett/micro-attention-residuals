@@ -122,6 +122,7 @@ state_dict = {
     "wte": matrix(vocab_size, n_embd),
     "wpe": matrix(block_size, n_embd),
     "lm_head": matrix(vocab_size, n_embd),
+    "out_res_proj": matrix(1, n_embd, 0),  # AttnRes pseudo-query (zero-init)
 }
 for i in range(n_layer):
     state_dict[f"layer{i}.attn_wq"] = matrix(n_embd, n_embd)
@@ -130,6 +131,8 @@ for i in range(n_layer):
     state_dict[f"layer{i}.attn_wo"] = matrix(n_embd, n_embd)
     state_dict[f"layer{i}.mlp_fc1"] = matrix(4 * n_embd, n_embd)
     state_dict[f"layer{i}.mlp_fc2"] = matrix(n_embd, 4 * n_embd)
+    state_dict[f"layer{i}.attn_res_proj"] = matrix(1, n_embd, 0)  # AttnRes pseudo-query
+    state_dict[f"layer{i}.mlp_res_proj"] = matrix(1, n_embd, 0)  # AttnRes pseudo-query
 params = [
     p for mat in state_dict.values() for row in mat for p in row
 ]  # flatten params into a single list[Value]
@@ -159,13 +162,22 @@ def gpt(token_id, pos_id, keys, values):
     tok_emb = state_dict["wte"][token_id]  # token embedding
     pos_emb = state_dict["wpe"][pos_id]  # position embedding
     x = [t + p for t, p in zip(tok_emb, pos_emb)]  # joint token and position embedding
-    x = rmsnorm(
-        x
-    )  # note: not redundant due to backward pass via the residual connection
+    layer_outs = [x]  # Full AttnRes: collect all sub-layer outputs
 
     for li in range(n_layer):
-        # 1) Multi-head Attention block
-        x_residual = x
+        # 1) Multi-head Attention block — AttnRes: attend over all previous outputs
+        w = softmax(
+            [
+                sum(
+                    p * k
+                    for p, k in zip(
+                        state_dict[f"layer{li}.attn_res_proj"][0], rmsnorm(r)
+                    )
+                )
+                for r in layer_outs
+            ]
+        )
+        x = [sum(w[i] * layer_outs[i][j] for i in range(len(w))) for j in range(n_embd)]
         x = rmsnorm(x)
         q = linear(x, state_dict[f"layer{li}.attn_wq"])
         k = linear(x, state_dict[f"layer{li}.attn_wk"])
@@ -188,16 +200,32 @@ def gpt(token_id, pos_id, keys, values):
                 for j in range(head_dim)
             ]
             x_attn.extend(head_out)
-        x = linear(x_attn, state_dict[f"layer{li}.attn_wo"])
-        x = [a + b for a, b in zip(x, x_residual)]
-        # 2) MLP block
-        x_residual = x
+        layer_outs.append(linear(x_attn, state_dict[f"layer{li}.attn_wo"]))
+        # 2) MLP block — AttnRes: attend over all previous outputs
+        w = softmax(
+            [
+                sum(
+                    p * k
+                    for p, k in zip(
+                        state_dict[f"layer{li}.mlp_res_proj"][0], rmsnorm(r)
+                    )
+                )
+                for r in layer_outs
+            ]
+        )
+        x = [sum(w[i] * layer_outs[i][j] for i in range(len(w))) for j in range(n_embd)]
         x = rmsnorm(x)
         x = linear(x, state_dict[f"layer{li}.mlp_fc1"])
         x = [xi.relu() for xi in x]
-        x = linear(x, state_dict[f"layer{li}.mlp_fc2"])
-        x = [a + b for a, b in zip(x, x_residual)]
+        layer_outs.append(linear(x, state_dict[f"layer{li}.mlp_fc2"]))
 
+    w = softmax(
+        [
+            sum(p * k for p, k in zip(state_dict["out_res_proj"][0], rmsnorm(r)))
+            for r in layer_outs
+        ]
+    )
+    x = [sum(w[i] * layer_outs[i][j] for i in range(len(w))) for j in range(n_embd)]
     logits = linear(x, state_dict["lm_head"])
     return logits
 
