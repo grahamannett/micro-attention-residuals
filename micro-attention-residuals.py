@@ -1,9 +1,7 @@
 """
-The most atomic way to train and run inference for a GPT in pure, dependency-free Python.
-This file is the complete algorithm.
-Everything else is just efficiency.
+Micro GPT with Full Attention Residuals
 
-@karpathy
+@grahamannett
 """
 
 import os  # os.path.exists
