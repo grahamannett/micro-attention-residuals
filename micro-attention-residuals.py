@@ -162,7 +162,7 @@ def gpt(token_id, pos_id, keys, values):
     tok_emb = state_dict["wte"][token_id]  # token embedding
     pos_emb = state_dict["wpe"][pos_id]  # position embedding
     x = [t + p for t, p in zip(tok_emb, pos_emb)]  # joint token and position embedding
-    blocks = [x]  # blocks already include token embedding
+    blocks = []  # completed block reps; embedding enters via first boundary commit
     partial_block = x
 
     for li in range(n_layer):
