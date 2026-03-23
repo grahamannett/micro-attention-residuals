@@ -184,7 +184,7 @@ def gpt(token_id, pos_id, keys, values):
         ]
 
         # if reaches block boundary, start a new block before the attention update
-        if li > 0 and li % layers_per_block == 0:
+        if li % layers_per_block == 0:
             blocks.append(partial_block)
             partial_block = None
 
