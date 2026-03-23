@@ -1,5 +1,5 @@
 """
-Micro GPT with Full Attention Residuals
+Micro GPT with Block Attention Residuals
 
 @grahamannett
 """
@@ -113,6 +113,8 @@ n_embd = 16  # width of the network (embedding dimension)
 block_size = 16  # maximum context length of the attention window (note: the longest name is 15 characters)
 n_head = 4  # number of attention heads
 head_dim = n_embd // n_head  # derived dimension of each head
+attnres_block_size = 2  # counts residual sites: ATTN + MLP
+layers_per_block = max(1, attnres_block_size // 2)
 matrix = lambda nout, nin, std=0.08: [
     [Value(random.gauss(0, std)) for _ in range(nin)] for _ in range(nout)
 ]
@@ -160,10 +162,11 @@ def gpt(token_id, pos_id, keys, values):
     tok_emb = state_dict["wte"][token_id]  # token embedding
     pos_emb = state_dict["wpe"][pos_id]  # position embedding
     x = [t + p for t, p in zip(tok_emb, pos_emb)]  # joint token and position embedding
-    layer_outs = [x]  # Full AttnRes: collect all sub-layer outputs
+    blocks = [x]  # blocks already include token embedding
+    partial_block = x
 
     for li in range(n_layer):
-        # 1) Multi-head Attention block — AttnRes: attend over all previous outputs
+        # 1) Multi-head Attention block — Block AttnRes: attend over completed blocks + current partial
         w = softmax(
             [
                 sum(
@@ -172,10 +175,19 @@ def gpt(token_id, pos_id, keys, values):
                         state_dict[f"layer{li}.attn_res_proj"][0], rmsnorm(r)
                     )
                 )
-                for r in layer_outs
+                for r in blocks + [partial_block]
             ]
         )
-        x = [sum(w[i] * layer_outs[i][j] for i in range(len(w))) for j in range(n_embd)]
+        x = [
+            sum(w[i] * (blocks + [partial_block])[i][j] for i in range(len(w)))
+            for j in range(n_embd)
+        ]
+
+        # if reaches block boundary, start a new block before the attention update
+        if li > 0 and li % layers_per_block == 0:
+            blocks.append(partial_block)
+            partial_block = None
+
         x = rmsnorm(x)
         q = linear(x, state_dict[f"layer{li}.attn_wq"])
         k = linear(x, state_dict[f"layer{li}.attn_wk"])
@@ -198,8 +210,14 @@ def gpt(token_id, pos_id, keys, values):
                 for j in range(head_dim)
             ]
             x_attn.extend(head_out)
-        layer_outs.append(linear(x_attn, state_dict[f"layer{li}.attn_wo"]))
-        # 2) MLP block — AttnRes: attend over all previous outputs
+        attn_out = linear(x_attn, state_dict[f"layer{li}.attn_wo"])
+        partial_block = (
+            attn_out
+            if partial_block is None
+            else [a + b for a, b in zip(partial_block, attn_out)]
+        )
+
+        # 2) MLP block — Block AttnRes: attend over completed blocks + current partial
         w = softmax(
             [
                 sum(
@@ -208,22 +226,29 @@ def gpt(token_id, pos_id, keys, values):
                         state_dict[f"layer{li}.mlp_res_proj"][0], rmsnorm(r)
                     )
                 )
-                for r in layer_outs
+                for r in blocks + [partial_block]
             ]
         )
-        x = [sum(w[i] * layer_outs[i][j] for i in range(len(w))) for j in range(n_embd)]
+        x = [
+            sum(w[i] * (blocks + [partial_block])[i][j] for i in range(len(w)))
+            for j in range(n_embd)
+        ]
         x = rmsnorm(x)
         x = linear(x, state_dict[f"layer{li}.mlp_fc1"])
         x = [xi.relu() for xi in x]
-        layer_outs.append(linear(x, state_dict[f"layer{li}.mlp_fc2"]))
+        mlp_out = linear(x, state_dict[f"layer{li}.mlp_fc2"])
+        partial_block = [a + b for a, b in zip(partial_block, mlp_out)]
 
     w = softmax(
         [
             sum(p * k for p, k in zip(state_dict["out_res_proj"][0], rmsnorm(r)))
-            for r in layer_outs
+            for r in blocks + [partial_block]
         ]
     )
-    x = [sum(w[i] * layer_outs[i][j] for i in range(len(w))) for j in range(n_embd)]
+    x = [
+        sum(w[i] * (blocks + [partial_block])[i][j] for i in range(len(w)))
+        for j in range(n_embd)
+    ]
     logits = linear(x, state_dict["lm_head"])
     return logits
 
@@ -278,7 +303,7 @@ for sample_idx in range(20):
     sample = []
     for pos_id in range(block_size):
         logits = gpt(token_id, pos_id, keys, values)
-        probs = softmax([l / temperature for l in logits])
+        probs = softmax([logit / temperature for logit in logits])
         token_id = random.choices(range(vocab_size), weights=[p.data for p in probs])[0]
         if token_id == BOS:
             break
