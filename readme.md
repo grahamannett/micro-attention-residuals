@@ -20,7 +20,7 @@ x = x + attn(rmsnorm(x))    # attention adds to residual
 x = x + mlp(rmsnorm(x))     # MLP adds to residual
 ```
 
-Attention Residuals replace this with a *learned weighted mix* over previous outputs. Before each sublayer, a small projection scores all candidates via softmax, and the model picks how much of each prior output to use as input — rather than always using the sum.
+Attention Residuals change how the **input to each sublayer** is constructed. Instead of feeding the running sum directly into the next sublayer, a small projection scores all previous candidates via softmax, and the model does a learned weighted mix to produce the sublayer input. The additive residual accumulation itself is preserved — sublayer outputs still sum into the residual stream — but the network gets to *choose* what each sublayer sees rather than always seeing the cumulative sum.
 
 ## MoonshotAI's pseudocode
 
